@@ -1,3 +1,0 @@
-xdp_kv.o
-toy-kvs/kvstore
-testsBPF/xdpfilter80.o
