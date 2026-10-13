@@ -19,4 +19,21 @@ cat /sys/kernel/tracing/trace_pipe
 ```
 
 
-faire un code qui capture les requetes sur le port 80 par exemple
+
+build on ubuntu
+
+```bash
+clang -O2 -g -target bpf -I/usr/include/$(uname -m)-linux-gnu -c xdpfilter80.c -o xdpfilter80.o
+```
+
+run on ubuntu (su)
+
+```bash
+ip link set dev lo xdpgeneric obj xdpfilter80.o sec xdp
+```
+
+stack trace for BPF prints (su)
+
+```bash
+cat /sys/kernel/tracing/trace_pipe
+```
