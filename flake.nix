@@ -188,6 +188,17 @@
     {
       packages = nixpkgs.lib.genAttrs systems (system: (mkSystem system).packages);
       apps = nixpkgs.lib.genAttrs systems (system: (mkSystem system).apps);
+      devShells = nixpkgs.lib.genAttrs systems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        {
+          default = pkgs.mkShell {
+            packages = [ pkgs.bpftools ];
+          };
+        }
+      );
 
       defaultPackage = nixpkgs.lib.genAttrs systems (system: self.packages.${system}."testsBPF/test.c");
     };
