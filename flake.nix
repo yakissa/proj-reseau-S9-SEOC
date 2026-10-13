@@ -1,5 +1,5 @@
 {
-  description = "Nix flake for BPF program developpement";
+  description = "Nix flake for BPF program development";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -17,47 +17,52 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-          bpfSource =
-            let
-              configuredSource = builtins.getEnv "BPF_SRC";
-            in
-            if configuredSource == "" then "testsBPF/test.c" else configuredSource;
-          bpfProgram = pkgs.stdenvNoCC.mkDerivation {
-            pname = "testsBPF-test";
-            version = "1.0";
+          lib = pkgs.lib;
 
-            src = ./.;
+          # Tous les .c de testsBPF/ -> ["test" "xdpfilter80" ...]
+          bpfNames = map (lib.removeSuffix ".c") (
+            lib.filter (lib.hasSuffix ".c") (builtins.attrNames (builtins.readDir ./testsBPF))
+          );
 
-            nativeBuildInputs = [ pkgs.llvmPackages.clang-unwrapped ];
-            buildInputs = [
-              pkgs.libbpf
-              pkgs.linuxHeaders
-            ];
+          mkBpf =
+            name:
+            pkgs.stdenvNoCC.mkDerivation {
+              pname = "bpf-${name}";
+              version = "1.0";
+              src = ./.;
 
-            buildPhase = ''
-              ${pkgs.llvmPackages.clang-unwrapped}/bin/clang \
-                -O2 -g -target bpf \
-                -I${pkgs.linuxHeaders}/include \
-                -I${pkgs.libbpf}/include \
-                -c ${bpfSource} -o test.o
-            '';
+              nativeBuildInputs = [ pkgs.llvmPackages.clang-unwrapped ];
+              buildInputs = [
+                pkgs.libbpf
+                pkgs.linuxHeaders
+              ];
 
-            installPhase = ''
-              mkdir -p $out/lib/bpf
-              cp test.o $out/lib/bpf/
-            '';
+              buildPhase = ''
+                clang -O2 -g -target bpf \
+                  -I${pkgs.linuxHeaders}/include \
+                  -I${pkgs.libbpf}/include \
+                  -c testsBPF/${name}.c -o ${name}.o
+              '';
 
-            meta = with pkgs.lib; {
-              description = "BPF object built from testsBPF/test.c";
-              license = licenses.unlicense;
-              platforms = platforms.unix;
+              installPhase = ''
+                mkdir -p $out/lib/bpf
+                cp ${name}.o $out/lib/bpf/
+              '';
+
+              meta.description = "BPF object built from testsBPF/${name}.c";
             };
-          };
+
+          bpfPrograms = lib.genAttrs bpfNames mkBpf;
+
           loaderSource = pkgs.writeText "load-bpf.c" ''
             #define _GNU_SOURCE
             #include <bpf/libbpf.h>
+            #include <bpf/bpf.h>
+            #include <linux/if_link.h>
+            #include <net/if.h>
             #include <errno.h>
             #include <signal.h>
+            #include <string.h>
             #include <sys/resource.h>
             #include <stdio.h>
             #include <stdlib.h>
@@ -71,16 +76,53 @@
               exiting = 1;
             }
 
+            static void usage(const char *name)
+            {
+              fprintf(stderr, "usage: %s <object.o> [interface] [--skb]\n", name);
+              fprintf(stderr, "  interface : requis pour les programmes XDP (ex: eth0, lo)\n");
+              fprintf(stderr, "  --skb     : force le mode XDP generique (sans support driver)\n");
+            }
+
             int main(int argc, char **argv)
             {
-              const char *defaultObject = "${bpfProgram}/lib/bpf/test.o";
-              const char *objectPath = argc > 1 ? argv[1] : defaultObject;
+              const char *objectPath = NULL;
+              const char *ifName = NULL;
+              unsigned int xdpFlags = 0;
+              int ifIndex = 0;
+              int xdpAttached = 0;
+
               struct bpf_object *object = NULL;
               struct bpf_program *program = NULL;
               struct bpf_link **links = NULL;
               size_t programCount = 0;
               size_t programIndex = 0;
               int error = 0;
+
+              for (int i = 1; i < argc; i++) {
+                if (strcmp(argv[i], "--skb") == 0) {
+                  xdpFlags |= XDP_FLAGS_SKB_MODE;
+                } else if (!objectPath) {
+                  objectPath = argv[i];
+                } else if (!ifName) {
+                  ifName = argv[i];
+                } else {
+                  usage(argv[0]);
+                  return 1;
+                }
+              }
+
+              if (!objectPath) {
+                usage(argv[0]);
+                return 1;
+              }
+
+              if (ifName) {
+                ifIndex = if_nametoindex(ifName);
+                if (ifIndex == 0) {
+                  fprintf(stderr, "unknown interface: %s\n", ifName);
+                  return 1;
+                }
+              }
 
               signal(SIGINT, handleSignal);
               signal(SIGTERM, handleSignal);
@@ -115,17 +157,41 @@
               }
 
               bpf_object__for_each_program(program, object) {
-                links[programIndex] = bpf_program__attach(program);
-                if (!links[programIndex]) {
-                  fprintf(stderr, "failed to attach program: %s\n", bpf_program__name(program));
-                  error = 1;
-                  goto cleanup;
+                const char *progName = bpf_program__name(program);
+
+                if (bpf_program__type(program) == BPF_PROG_TYPE_XDP) {
+                  if (ifIndex == 0) {
+                    fprintf(stderr, "program %s is XDP: an interface name is required\n", progName);
+                    error = 1;
+                    goto cleanup;
+                  }
+                  if (xdpAttached) {
+                    fprintf(stderr, "only one XDP program can be attached per interface (skipping %s)\n", progName);
+                    programIndex++;
+                    continue;
+                  }
+
+                  error = bpf_xdp_attach(ifIndex, bpf_program__fd(program), xdpFlags, NULL);
+                  if (error) {
+                    fprintf(stderr, "failed to attach XDP program %s on %s: %s\n",
+                            progName, ifName, strerror(-error));
+                    goto cleanup;
+                  }
+                  xdpAttached = 1;
+                  printf("XDP program %s attached on %s\n", progName, ifName);
+                } else {
+                  links[programIndex] = bpf_program__attach(program);
+                  if (!links[programIndex]) {
+                    fprintf(stderr, "failed to attach program: %s\n", progName);
+                    error = 1;
+                    goto cleanup;
+                  }
                 }
 
                 programIndex++;
               }
 
-              printf("Loaded and attached %zu BPF program(s) from %s\n", programCount, objectPath);
+              printf("Loaded %zu BPF program(s) from %s\n", programCount, objectPath);
               printf("Press Ctrl-C to detach.\n");
 
               while (!exiting) {
@@ -133,27 +199,33 @@
               }
 
             cleanup:
+              if (xdpAttached) {
+                bpf_xdp_attach(ifIndex, -1, xdpFlags, NULL);
+                printf("XDP program detached from %s\n", ifName);
+              }
+
               if (links) {
                 for (size_t index = 0; index < programIndex; index++) {
-                  bpf_link__destroy(links[index]);
+                  if (links[index]) {
+                    bpf_link__destroy(links[index]);
+                  }
                 }
               }
 
               free(links);
               bpf_object__close(object);
-              return error;
+              return error ? 1 : 0;
             }
           '';
+
           loader = pkgs.stdenv.mkDerivation {
             pname = "load-bpf";
             version = "1.0";
-
             src = loaderSource;
+            dontUnpack = true;
 
             nativeBuildInputs = [ pkgs.pkg-config ];
             buildInputs = [ pkgs.libbpf ];
-
-            dontUnpack = true;
 
             buildPhase = ''
               cc $src -o load-bpf $(pkg-config --cflags --libs libbpf)
@@ -164,21 +236,28 @@
               cp load-bpf $out/bin/
             '';
           };
+
+          # Une app par programme : loader + chemin du .o
+          mkApp =
+            name:
+            let
+              script = pkgs.writeShellScript "run-${name}" ''
+                exec ${loader}/bin/load-bpf ${bpfPrograms.${name}}/lib/bpf/${name}.o "$@"
+              '';
+            in
+            {
+              type = "app";
+              program = "${script}";
+            };
         in
         {
-          packages = {
-            "testsBPF/test.c" = bpfProgram;
-            testsBPF-test = bpfProgram;
+          packages = bpfPrograms // {
             load-bpf = loader;
+            default = bpfPrograms.test or (lib.head (lib.attrValues bpfPrograms));
           };
 
-          apps = {
+          apps = (lib.genAttrs bpfNames mkApp) // {
             load-bpf = {
-              type = "app";
-              program = "${loader}/bin/load-bpf";
-            };
-
-            run-testsBPF-test = {
               type = "app";
               program = "${loader}/bin/load-bpf";
             };
@@ -199,7 +278,5 @@
           };
         }
       );
-
-      defaultPackage = nixpkgs.lib.genAttrs systems (system: self.packages.${system}."testsBPF/test.c");
     };
 }
