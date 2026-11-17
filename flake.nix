@@ -19,10 +19,21 @@
           pkgs = import nixpkgs { inherit system; };
           lib = pkgs.lib;
 
-          # Tous les .c de testsBPF/ -> ["test" "xdpfilter80" ...]
-          bpfNames = map (lib.removeSuffix ".c") (
-            lib.filter (lib.hasSuffix ".c") (builtins.attrNames (builtins.readDir ./testsBPF))
+          # Sources BPF disponibles:
+          # - tous les .c de testsBPF/
+          # - src/buildxdp.c expose comme cible "buildxdp"
+          testsBpfSources = builtins.listToAttrs (
+            map (file: {
+              name = lib.removeSuffix ".c" file;
+              value = ./testsBPF + "/${file}";
+            }) (lib.filter (lib.hasSuffix ".c") (builtins.attrNames (builtins.readDir ./testsBPF)))
           );
+
+          bpfSources = testsBpfSources // {
+            buildxdp = ./src/buildxdp.c;
+          };
+
+          bpfNames = builtins.attrNames bpfSources;
 
           mkBpf =
             name:
@@ -41,7 +52,7 @@
                 clang -O2 -g -target bpf \
                   -I${pkgs.linuxHeaders}/include \
                   -I${pkgs.libbpf}/include \
-                  -c testsBPF/${name}.c -o ${name}.o
+                  -c ${bpfSources.${name}} -o ${name}.o
               '';
 
               installPhase = ''
