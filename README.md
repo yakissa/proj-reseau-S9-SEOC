@@ -1,4 +1,4 @@
-### notes
+### proj-reseau-S9-SEOC
 
 build on nix 
 
@@ -6,16 +6,31 @@ build on nix
 nix build .#load-bpf
 ```
 
-run on nix (su)
+to attach a bpf program in nix
 
 ```bash
-nix run .#load-bpf
+sudo nix run .#load-bpf <path/to/file.o> <interface>
+
+# exemple
+sudo nix run .#load-bpf result/lib/bpf/xdp_kv.o lo
 ```
 
-stack trace for BPF prints (su)
+run the kvstore server
 
 ```bash
-cat /sys/kernel/tracing/trace_pipe
+sudo nix run .#kvstore
+```
+
+run the tests for kvstore
+
+```bash
+python3 testsBPF/test_kvstore.py
+```
+
+stack trace for BPF prints
+
+```bash
+sudo cat /sys/kernel/tracing/trace_pipe
 ```
 
 
