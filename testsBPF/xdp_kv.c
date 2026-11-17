@@ -83,13 +83,14 @@ int xdp_kv_filter(struct xdp_md *ctx)
     return XDP_PASS;             /* le serveur répond normalement */
 }
 
-static __always_inline __u32 uint_to_str(__u32 n, char out[11])   //Conversion d'un nombre en tableau de caractères
+//Conversion d'un nombre en tableau de caractères
+static __always_inline __u32 uint_to_str(__u32 n, char out[11])
 {
     __u32 digits = 1;
     __u32 tmp = n;
 
     #pragma unroll
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < 9; i++) {   //Décompte du nombre de chiffres
         if (tmp < 10)
             break;
 
@@ -100,7 +101,7 @@ static __always_inline __u32 uint_to_str(__u32 n, char out[11])   //Conversion d
     tmp = n;
 
     #pragma unroll
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 10; i++) {  //Transformation du nombre en tableau de caractères
         if (i >= digits)
             break;
 
@@ -124,17 +125,17 @@ static __always_inline int build_response(
     char str_len[11];
     __u32 size_value_len = uint_to_str(value_len, str_len);
 
-    _u32 response_len = 6 + key_len + flag_len + 1 + size_value_len + value_len + 7   //VALUE + key + flag + nb_chiffres de value_len + \r\n + value + \r\nEND\r\n
-    __u32 old_payload_len =
-        bpf_ntohs(udp->len) - sizeof(struct udphdr) - 8;
-    int delta = response_len - old_payload_len;
+    //payload_len = VALUE + key + flag + size_value_len + \r\n + value + \r\nEND\r\n
+    __u32 payload_len = 6 + key_len + flag_len + 1 + size_value_len + 2 + value_len + 7   
+    __u32 old_payload_len = bpf_ntohs(udp->len) - sizeof(struct udphdr) - 8;
+    int delta = payload_len - old_payload_len;
 
-    if (bpf_xdp_ajust_tail(ctxn, delta)<0) {        //redimmensionnement du paquet
+    if (bpf_xdp_ajust_tail(ctx, delta)<0) {        //redimmensionnement du paquet
         return XDP_PASS
     }
 
-    //vérif et recalcul des pointeurs
-    void *data = (void *)(long)ctx->data;           
+    //vérification et recalcul des pointeurs
+    void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->(data_end);
 
     struct ethhdr *eth = data;
@@ -150,7 +151,7 @@ static __always_inline int build_response(
         return XDP_PASS;
     
     //Ecriture du payload
-    char *curseur = (char *)(udp+1) + MEME_CACHED_LEN;    //payload = data + eth + ip + udp + memecached
+    char *curseur = (char *)(udp+1) + MC_HDR_LEN;
     const char prefix1[] = "VALUE ";
     for (i=0; i<6; i++){
         if (curseur + 1 > (char *)data_end)
