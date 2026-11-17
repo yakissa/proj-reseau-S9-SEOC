@@ -7,7 +7,7 @@
 #include <bpf/bpf_endian.h>
 
 #define KV_PORT    11211
-#define MC_HDR_LEN 8          /* en-tête Memcached UDP */
+#define MC_HDR_LEN 8          
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
@@ -53,7 +53,6 @@ int xdp_kv_filter(struct xdp_md *ctx)
 
     inc(STAT_UDP_KV);
 
-    /* payload : 8 octets d'en-tête Memcached, puis la commande */
     char *cmd = (char *)(udp + 1) + MC_HDR_LEN;
     if ((void *)(cmd + 4) > data_end)
         return XDP_PASS;
@@ -61,5 +60,5 @@ int xdp_kv_filter(struct xdp_md *ctx)
     if (cmd[0] == 'g' && cmd[1] == 'e' && cmd[2] == 't' && cmd[3] == ' ')
         inc(STAT_GET);
 
-    return XDP_PASS;             /* le serveur répond normalement */
+    return XDP_PASS;            
 }
