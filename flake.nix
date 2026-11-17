@@ -249,10 +249,53 @@
               type = "app";
               program = "${script}";
             };
+          # Serveur kvstore, compilé avec ton Makefile
+          kvstore = pkgs.stdenv.mkDerivation {
+            pname = "kvstore";
+            version = "1.0";
+
+            # Seulement ces deux fichiers : on ne recompile que s'ils changent
+            src = lib.fileset.toSource {
+              root = ./server;
+              fileset = lib.fileset.unions [
+                ./server/Makefile
+                ./server/kvstore.c
+              ];
+            };
+
+            # make (phase par défaut) utilise ton Makefile, il ne reste que l'install
+            installPhase = ''
+              mkdir -p $out/bin
+              install -m755 kvstore $out/bin/kvstore
+            '';
+
+            meta = {
+              description = "Serveur cle-valeur compatible Memcached (TCP+UDP)";
+              mainProgram = "kvstore";
+            };
+          };
+          # Python uniquement dans le store Nix (stdlib suffit pour le test)
+          testScript = ./server/test_kvstore.py;
+
+          # Lance les tests contre un serveur déjà démarré : [hôte] [port]
+          kvstoreTest = pkgs.writeShellScript "test-kvstore" ''
+            exec ${pkgs.python3}/bin/python3 ${testScript} "$@"
+          '';
+
+          # Démarre kvstore tout seul, lance les tests, puis l'arrête
+          kvstoreCheck = pkgs.writeShellScript "check-kvstore" ''
+            port="''${1:-11299}"
+            ${kvstore}/bin/kvstore -p "$port" 2>/dev/null &
+            pid=$!
+            trap 'kill $pid 2>/dev/null' EXIT
+            sleep 0.5
+            ${pkgs.python3}/bin/python3 ${testScript} 127.0.0.1 "$port"
+          '';
         in
         {
           packages = bpfPrograms // {
             load-bpf = loader;
+            inherit kvstore;
             default = bpfPrograms.test or (lib.head (lib.attrValues bpfPrograms));
           };
 
@@ -260,6 +303,20 @@
             load-bpf = {
               type = "app";
               program = "${loader}/bin/load-bpf";
+            };
+
+            kvstore = {
+              type = "app";
+              program = "${kvstore}/bin/kvstore";
+            };
+            test-kvstore = {
+              type = "app";
+              program = "${kvstoreTest}";
+            };
+
+            check-kvstore = {
+              type = "app";
+              program = "${kvstoreCheck}";
             };
           };
         };
@@ -274,7 +331,12 @@
         in
         {
           default = pkgs.mkShell {
-            packages = [ pkgs.bpftools ];
+            packages = [
+              pkgs.bpftools
+              pkgs.gnumake
+              pkgs.gcc
+              pkgs.netcat
+            ];
           };
         }
       );
